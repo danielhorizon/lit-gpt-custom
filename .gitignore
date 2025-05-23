@@ -1,0 +1,53 @@
+# Specific project directories to ignore
+out/
+tokenizer/
+data/
+litgpt.egg-info/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+ENV/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Logging
+*.log
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Build artifacts and dependencies
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Local configuration
+.python-version
+
