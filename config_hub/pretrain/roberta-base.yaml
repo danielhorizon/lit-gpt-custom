@@ -1,0 +1,55 @@
+# RoBERTa-base pretraining configuration
+# Based on the original RoBERTa paper settings
+
+data:
+  dataset_class: litgpt.data.wikitext.WikiTextMLMDataModule  # Will be overridden in test_mode
+  block_size: 512
+  train_batch_size: 8
+  val_batch_size: 8
+  num_workers: 4
+
+train:
+  # Number of optimizer steps between saving checkpoints
+  save_interval: 1000
+
+  # Number of iterations between logging calls
+  log_interval: 1
+
+  # Number of samples between optimizer steps across data-parallel ranks
+  global_batch_size: 32
+
+  # Number of samples per data-parallel rank
+  micro_batch_size: 8
+
+  # Training duration
+  epochs: 3  # For initial testing
+
+eval:
+  # Number of optimizer steps between evaluation calls
+  interval: 100
+
+  # Number of iterations for evaluation
+  max_iters: 100
+
+  # Whether to evaluate on the validation set at the beginning of the training
+  initial_validation: true
+
+  # Whether to evaluate on the validation set at the end the training
+  final_validation: true
+
+# Optimizer-related arguments
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 5e-4  # RoBERTa peak learning rate
+    weight_decay: 0.01  # RoBERTa default
+    betas:
+      - 0.9
+      - 0.999
+    eps: 1e-8
+
+# Learning rate scheduler settings
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.LambdaLR
+  init_args:
+    warmup_steps: 10000  # 2% of total steps 
