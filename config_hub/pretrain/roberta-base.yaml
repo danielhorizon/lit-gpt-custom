@@ -1,28 +1,29 @@
 # RoBERTa-base pretraining configuration
 # Based on the original RoBERTa paper settings
 
-data:
-  dataset_class: litgpt.data.wikitext.WikiTextMLMDataModule  # Will be overridden in test_mode
+model:
+  name: "roberta-base"
+  n_layer: 12
+  n_embd: 768
+  vocab_size: 50265
   block_size: 512
-  train_batch_size: 8
+  bias: true
+
+data:
+  data_path: "data/wikitext"  # Path to your streaming dataset
+  block_size: 512
+  micro_batch_size: 8  # Batch size per GPU
   val_batch_size: 8
   num_workers: 4
+  seed: 42
 
 train:
-  # Number of optimizer steps between saving checkpoints
-  save_interval: 1000
-
-  # Number of iterations between logging calls
-  log_interval: 1
-
-  # Number of samples between optimizer steps across data-parallel ranks
-  global_batch_size: 32
-
-  # Number of samples per data-parallel rank
-  micro_batch_size: 8
-
-  # Training duration
-  epochs: 3  # For initial testing
+  devices: "auto"  # Use all available GPUs
+  precision: "16-mixed"  # Use mixed precision training
+  epochs: 3
+  log_interval: 100
+  gradient_clip_val: 1.0
+  gradient_accumulation_steps: 1  # Adjust based on your needs
 
 eval:
   # Number of optimizer steps between evaluation calls
@@ -39,17 +40,17 @@ eval:
 
 # Optimizer-related arguments
 optimizer:
-  class_path: torch.optim.AdamW
+  class_path: "torch.optim.AdamW"
   init_args:
-    lr: 5e-4  # RoBERTa peak learning rate
-    weight_decay: 0.01  # RoBERTa default
-    betas:
-      - 0.9
-      - 0.999
+    lr: 1e-4
+    betas: [0.9, 0.999]
     eps: 1e-8
+    weight_decay: 0.01
 
 # Learning rate scheduler settings
 lr_scheduler:
-  class_path: torch.optim.lr_scheduler.LambdaLR
+  class_path: "torch.optim.lr_scheduler.LambdaLR"
   init_args:
-    warmup_steps: 10000  # 2% of total steps 
+    warmup_steps: 1000
+
+output_dir: "out/roberta_wikitext" 

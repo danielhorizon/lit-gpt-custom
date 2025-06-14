@@ -3,12 +3,14 @@ import logging
 import math
 import torch
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Any
 import yaml
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch import LightningModule
+from torch.utils.data import DataLoader
+from litdata.streaming import StreamingDataset, StreamingDataLoader, TokensLoader
 
 from litgpt.model import Roberta
 from litgpt.config import Config
@@ -109,6 +111,69 @@ class RobertaLightningModule(L.LightningModule):
             return float(current_step) / float(max(1, warmup_steps))
         return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - warmup_steps)))
 
+class StreamingMLMDataModule:
+    """Streaming data module for MLM pretraining."""
+    
+    def __init__(
+        self,
+        data_path: Union[str, Path],
+        tokenizer: Tokenizer,
+        block_size: int = 512,
+        micro_batch_size: int = 8,
+        val_batch_size: int = 8,
+        num_workers: int = 4,
+        seed: int = 42,
+    ):
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.block_size = block_size
+        self.micro_batch_size = micro_batch_size
+        self.val_batch_size = val_batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        
+        # Setup paths
+        self.train_path = self.data_path / "train"
+        self.val_path = self.data_path / "val"
+        
+    def prepare_data(self):
+        """Prepare the data for streaming."""
+        if not self.train_path.exists() or not self.val_path.exists():
+            raise FileNotFoundError(
+                f"Data paths not found. Expected {self.train_path} and {self.val_path} to exist."
+            )
+    
+    def train_dataloader(self) -> DataLoader:
+        """Create streaming train dataloader."""
+        dataset = StreamingDataset(
+            input_dir=str(self.train_path),
+            item_loader=TokensLoader(block_size=self.block_size),
+            shuffle=True,
+            seed=self.seed,
+        )
+        return StreamingDataLoader(
+            dataset,
+            batch_size=self.micro_batch_size,
+            pin_memory=True,
+            num_workers=self.num_workers,
+            drop_last=True,
+        )
+    
+    def val_dataloader(self) -> DataLoader:
+        """Create streaming validation dataloader."""
+        dataset = StreamingDataset(
+            input_dir=str(self.val_path),
+            item_loader=TokensLoader(block_size=self.block_size),
+            shuffle=False,
+        )
+        return StreamingDataLoader(
+            dataset,
+            batch_size=self.val_batch_size,
+            pin_memory=True,
+            num_workers=self.num_workers,
+            drop_last=True,
+        )
+
 def get_data_module(config: dict, tokenizer: Tokenizer, test_mode: bool = False):
     """Get the appropriate data module based on config and test mode."""
     if test_mode:
@@ -120,21 +185,15 @@ def get_data_module(config: dict, tokenizer: Tokenizer, test_mode: bool = False)
             val_batch_size=config["data"]["val_batch_size"],
         )
     
-    # Get the dataset class from config
-    dataset_class = config["data"]["dataset_class"]
-    logger.info(f"Using dataset class: {dataset_class}")
-    
-    # Import the dataset class dynamically
-    module_path, class_name = dataset_class.rsplit(".", 1)
-    module = __import__(module_path, fromlist=[class_name])
-    dataset_class = getattr(module, class_name)
-    
-    return dataset_class(
+    logger.info("Using StreamingMLMDataModule for training")
+    return StreamingMLMDataModule(
+        data_path=config["data"]["data_path"],
         tokenizer=tokenizer,
         block_size=config["data"]["block_size"],
-        train_batch_size=config["data"]["train_batch_size"],
+        micro_batch_size=config["data"]["micro_batch_size"],
         val_batch_size=config["data"]["val_batch_size"],
-        **config["data"].get("dataset_kwargs", {})
+        num_workers=config["data"].get("num_workers", 4),
+        seed=config["data"].get("seed", 42),
     )
 
 def main(config_path: str = "config_hub/pretrain/roberta-base.yaml", test_mode: bool = False):
@@ -172,34 +231,61 @@ def main(config_path: str = "config_hub/pretrain/roberta-base.yaml", test_mode: 
         model=model,
         config=config,
     )
-    
-    # Setup logging and checkpointing
-    tb_logger = TensorBoardLogger(out_dir, name="logs")
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=out_dir,
-        filename="roberta-{epoch:02d}-{train_loss:.2f}",
-        save_top_k=3,
-        monitor="train_loss",
-        mode="min",
-    )
-    
-    # Initialize trainer
-    trainer = L.Trainer(
-        max_epochs=config["train"]["epochs"],
-        devices=1,
+
+    # Setup Fabric for distributed training
+    fabric = L.Fabric(
         accelerator="auto",
-        logger=tb_logger,
-        callbacks=[checkpoint_callback],
-        gradient_clip_val=1.0,
+        devices=config["train"].get("devices", "auto"),
+        strategy="ddp",
+        precision=config["train"].get("precision", "32-true"),
     )
+    fabric.launch()
+
+    # Setup model and optimizer
+    model = fabric.setup(lightning_module.model)
+    optimizer = fabric.setup_optimizers(lightning_module.configure_optimizers()["optimizer"])
     
-    # Train
-    trainer.fit(lightning_module, data_module)
+    # Setup dataloaders with distributed sampling
+    train_dataloader, val_dataloader = fabric.setup_dataloaders(
+        data_module.train_dataloader(),
+        data_module.val_dataloader()
+    )
+
+    # Training loop
+    max_steps = config["train"]["epochs"] * len(train_dataloader)
+    current_step = 0
     
+    while current_step < max_steps:
+        for batch in train_dataloader:
+            if current_step >= max_steps:
+                break
+                
+            # Forward pass
+            logits = model(batch["input_ids"])
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                batch["labels"].view(-1),
+                ignore_index=-100
+            )
+            
+            # Backward pass with gradient accumulation
+            fabric.backward(loss)
+            
+            # Update weights
+            optimizer.step()
+            optimizer.zero_grad()
+            
+            # Logging
+            if fabric.is_global_zero and current_step % config["train"]["log_interval"] == 0:
+                fabric.print(f"Step {current_step}, Loss: {loss.item():.4f}")
+            
+            current_step += 1
+
     # Save final model
-    final_model_path = out_dir / "roberta_final.pt"
-    torch.save(model.state_dict(), final_model_path)
-    logger.info(f"Final model saved to {final_model_path}")
+    if fabric.is_global_zero:
+        final_model_path = out_dir / "roberta_final.pt"
+        torch.save(model.state_dict(), final_model_path)
+        logger.info(f"Final model saved to {final_model_path}")
 
 if __name__ == "__main__":
     import argparse
