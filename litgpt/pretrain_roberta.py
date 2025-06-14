@@ -231,58 +231,35 @@ def main(config_path: str = "config_hub/pretrain/roberta-base.yaml", test_mode: 
         model=model,
         config=config,
     )
-
-    # Setup Fabric for distributed training
-    fabric = L.Fabric(
-        accelerator="auto",
+    
+    # Setup logging and checkpointing
+    tb_logger = TensorBoardLogger(out_dir, name="logs")
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=out_dir,
+        filename="roberta-{epoch:02d}-{train_loss:.2f}",
+        save_top_k=3,
+        monitor="train_loss",
+        mode="min",
+    )
+    
+    # Initialize trainer with distributed training settings
+    trainer = L.Trainer(
+        max_epochs=config["train"]["epochs"],
         devices=config["train"].get("devices", "auto"),
+        accelerator="auto",
         strategy="ddp",
         precision=config["train"].get("precision", "32-true"),
+        logger=tb_logger,
+        callbacks=[checkpoint_callback],
+        gradient_clip_val=config["train"].get("gradient_clip_val", 1.0),
+        accumulate_grad_batches=config["train"].get("gradient_accumulation_steps", 1),
     )
-    fabric.launch()
-
-    # Setup model and optimizer
-    model = fabric.setup(lightning_module.model)
-    optimizer = fabric.setup_optimizers(lightning_module.configure_optimizers()["optimizer"])
     
-    # Setup dataloaders with distributed sampling
-    train_dataloader, val_dataloader = fabric.setup_dataloaders(
-        data_module.train_dataloader(),
-        data_module.val_dataloader()
-    )
-
-    # Training loop
-    max_steps = config["train"]["epochs"] * len(train_dataloader)
-    current_step = 0
+    # Train
+    trainer.fit(lightning_module, data_module)
     
-    while current_step < max_steps:
-        for batch in train_dataloader:
-            if current_step >= max_steps:
-                break
-                
-            # Forward pass
-            logits = model(batch["input_ids"])
-            loss = torch.nn.functional.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                batch["labels"].view(-1),
-                ignore_index=-100
-            )
-            
-            # Backward pass with gradient accumulation
-            fabric.backward(loss)
-            
-            # Update weights
-            optimizer.step()
-            optimizer.zero_grad()
-            
-            # Logging
-            if fabric.is_global_zero and current_step % config["train"]["log_interval"] == 0:
-                fabric.print(f"Step {current_step}, Loss: {loss.item():.4f}")
-            
-            current_step += 1
-
     # Save final model
-    if fabric.is_global_zero:
+    if trainer.is_global_zero:
         final_model_path = out_dir / "roberta_final.pt"
         torch.save(model.state_dict(), final_model_path)
         logger.info(f"Final model saved to {final_model_path}")
