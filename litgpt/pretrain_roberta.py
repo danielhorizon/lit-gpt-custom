@@ -111,7 +111,7 @@ class RobertaLightningModule(L.LightningModule):
             return float(current_step) / float(max(1, warmup_steps))
         return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - warmup_steps)))
 
-class StreamingMLMDataModule:
+class StreamingMLMDataModule(L.LightningDataModule):
     """Streaming data module for MLM pretraining."""
     
     def __init__(
@@ -124,6 +124,7 @@ class StreamingMLMDataModule:
         num_workers: int = 4,
         seed: int = 42,
     ):
+        super().__init__()
         self.data_path = Path(data_path)
         self.tokenizer = tokenizer
         self.block_size = block_size
@@ -136,8 +137,8 @@ class StreamingMLMDataModule:
         self.train_path = self.data_path / "train"
         self.val_path = self.data_path / "val"
         
-    def prepare_data(self):
-        """Prepare the data for streaming."""
+    def setup(self, stage: Optional[str] = None):
+        """Setup the dataset for training or validation."""
         if not self.train_path.exists() or not self.val_path.exists():
             raise FileNotFoundError(
                 f"Data paths not found. Expected {self.train_path} and {self.val_path} to exist."
@@ -173,6 +174,11 @@ class StreamingMLMDataModule:
             num_workers=self.num_workers,
             drop_last=True,
         )
+    
+    def test_dataloader(self) -> DataLoader:
+        """Create streaming test dataloader."""
+        # For now, we'll use the validation dataloader for testing
+        return self.val_dataloader()
 
 def get_data_module(config: dict, tokenizer: Tokenizer, test_mode: bool = False):
     """Get the appropriate data module based on config and test mode."""
